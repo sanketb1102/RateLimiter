@@ -1,0 +1,63 @@
+# API Rate Limiter & Quota Management Service
+#
+# Four containers. Only the gateway publishes a port.
+#
+#   gateway   nginx, plain reverse proxy. Routes traffic to the API.
+#             It does NOT do the rate limiting - it cannot, because the
+#             quota depends on which plan an API key is on, and that lives
+#             in Postgres. Nginx's own limit_req only knows IP addresses.
+#
+#   api       FastAPI. The quota decision happens in middleware here,
+#             before a request reaches any route handler.
+#
+#   redis     The counters. One shared Redis means multiple api replicas
+#             all enforce against the same count.
+#
+#   postgres  Source of truth for API keys and plan tiers.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ratelimiter
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ratelimiter"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: ./api
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/ratelimiter
+      REDIS_URL: redis://redis:6379/0
+      PLAN_CACHE_TTL_SECONDS: 60
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  gateway:
+    image: nginx:alpine
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
